@@ -1,0 +1,12 @@
+[package]
+name = "formula-refs"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Extract cell and range references from a spreadsheet formula"
+
+[[bin]]
+name = "formula-refs"
+path = "src/main.rs"
+
+[dependencies]
