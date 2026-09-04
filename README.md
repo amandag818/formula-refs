@@ -48,6 +48,7 @@ formula-refs --json '=SUM(A1:A10)+Sheet2!B1'
     {
       "reference": "A1:A10",
       "sheet": null,
+      "kind": "cell",
       "start": { "col": "A", "row": 1 },
       "end": { "col": "A", "row": 10 },
       "is_range": true,
@@ -56,12 +57,27 @@ formula-refs --json '=SUM(A1:A10)+Sheet2!B1'
     {
       "reference": "B1",
       "sheet": "Sheet2",
+      "kind": "cell",
       "start": { "col": "B", "row": 1 },
       "end": null,
       "is_range": false,
       "cell_count": 1
     }
   ]
+}
+```
+
+A reference to a defined name instead comes out with `"kind": "named"`,
+with no `start`/`end`/`cell_count` fields since the tool has no access to
+the workbook's name table and can't say how many cells the name resolves
+to:
+
+```json
+{
+  "reference": "TaxRate",
+  "sheet": null,
+  "kind": "named",
+  "name": "TaxRate"
 }
 ```
 
@@ -73,10 +89,14 @@ formula-refs --json '=SUM(A1:A10)+Sheet2!B1'
   `'Q1 Budget'!A1:B2`)
 - String literals in the formula are skipped, so `"A1:B2"` as literal text
   is not mistaken for a reference
+- Named ranges (e.g. `TaxRate` used in place of a cell reference), including
+  sheet-qualified ones (`Sheet1!TaxRate`). Since the tool never sees the
+  workbook's actual name table, it identifies these by elimination: a bare
+  word that isn't a cell reference and isn't immediately followed by `(`
+  (which would make it a function call) is treated as a name.
 
 ## What it doesn't handle yet
 
-- Named ranges (e.g. `TaxRate` used in place of a cell reference)
 - 3D references spanning a sheet range (`Sheet1:Sheet3!A1`)
 - Structured table references (`Table1[Column]`)
 

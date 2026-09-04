@@ -27,13 +27,13 @@ impl Cell {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct Reference {
+pub struct CellRange {
     pub sheet: Option<String>,
     pub start: Cell,
     pub end: Option<Cell>,
 }
 
-impl Reference {
+impl CellRange {
     pub fn to_a1(&self) -> String {
         let mut s = String::new();
         if let Some(sheet) = &self.sheet {
@@ -56,6 +56,57 @@ impl Reference {
                 let rows = (self.start.row as i64 - end.row as i64).unsigned_abs() + 1;
                 cols * rows
             }
+        }
+    }
+}
+
+// A defined name (workbook- or sheet-scoped) used where a cell or range
+// reference could otherwise appear, e.g. `TaxRate` in `=A1*TaxRate`. We
+// have no access to the workbook's actual name table, so we can't know
+// what it resolves to - only that it isn't a cell reference or a function
+// call, which is all a dependency audit needs.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NamedRange {
+    pub sheet: Option<String>,
+    pub name: String,
+}
+
+impl NamedRange {
+    pub fn to_a1(&self) -> String {
+        match &self.sheet {
+            Some(sheet) => format!("{}!{}", quote_sheet_name(sheet), self.name),
+            None => self.name.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Reference {
+    Cell(CellRange),
+    Named(NamedRange),
+}
+
+impl Reference {
+    pub fn to_a1(&self) -> String {
+        match self {
+            Reference::Cell(c) => c.to_a1(),
+            Reference::Named(n) => n.to_a1(),
+        }
+    }
+
+    pub fn sheet(&self) -> Option<&str> {
+        match self {
+            Reference::Cell(c) => c.sheet.as_deref(),
+            Reference::Named(n) => n.sheet.as_deref(),
+        }
+    }
+
+    // None for named ranges: without the workbook's name table we don't
+    // know how many cells a name resolves to.
+    pub fn cell_count(&self) -> Option<u64> {
+        match self {
+            Reference::Cell(c) => Some(c.cell_count()),
+            Reference::Named(_) => None,
         }
     }
 }
@@ -200,6 +251,26 @@ fn try_parse_quoted_sheet(chars: &[char], i: usize) -> Option<(String, usize)> {
     }
 }
 
+// Tries to parse a bare identifier starting at `chars[i]`: a letter or
+// underscore followed by letters, digits, underscores, or dots. Excel
+// names can't start with a digit, which is what keeps this from colliding
+// with cell references (those are handled by try_parse_cell first and
+// would already have matched). This only finds the word boundary - the
+// caller decides whether the word is actually a named-range reference or
+// something to skip (a function call, a boolean literal), since either
+// way the whole word must be consumed to avoid rescanning a trailing
+// fragment of it as its own token.
+fn try_parse_name(chars: &[char], i: usize) -> Option<(String, usize)> {
+    if !chars.get(i).is_some_and(|c| c.is_ascii_alphabetic() || *c == '_') {
+        return None;
+    }
+    let mut pos = i;
+    while chars.get(pos).is_some_and(|&c| is_word_char(c)) {
+        pos += 1;
+    }
+    Some((chars[i..pos].iter().collect(), pos))
+}
+
 fn skip_string_literal(chars: &[char], i: usize) -> usize {
     let mut pos = i + 1;
     loop {
@@ -256,8 +327,22 @@ pub fn extract(formula: &str) -> Vec<Reference> {
                     pos = next;
                 }
             }
-            refs.push(Reference { sheet, start, end });
+            refs.push(Reference::Cell(CellRange { sheet, start, end }));
             i = pos;
+            continue;
+        }
+
+        if let Some((name, next)) = try_parse_name(&chars, cell_start) {
+            // A name immediately followed by '(' is a function call, and
+            // TRUE/FALSE are boolean literals, not defined names. Either
+            // way the word is consumed; only whether we record it differs.
+            let is_function_call = chars.get(next) == Some(&'(');
+            let is_boolean_literal =
+                name.eq_ignore_ascii_case("TRUE") || name.eq_ignore_ascii_case("FALSE");
+            if !is_function_call && !is_boolean_literal {
+                refs.push(Reference::Named(NamedRange { sheet, name }));
+            }
+            i = next;
             continue;
         }
 
@@ -290,21 +375,26 @@ mod tests {
         let refs = extract("=SUM(A1:B10)");
         assert_eq!(refs.len(), 1);
         assert_eq!(refs[0].to_a1(), "A1:B10");
-        assert_eq!(refs[0].cell_count(), 20);
+        assert_eq!(refs[0].cell_count(), Some(20));
     }
 
     #[test]
     fn absolute_markers() {
         let refs = extract("=$A$1");
-        assert_eq!(refs[0].start.col_absolute, true);
-        assert_eq!(refs[0].start.row_absolute, true);
+        match &refs[0] {
+            Reference::Cell(c) => {
+                assert_eq!(c.start.col_absolute, true);
+                assert_eq!(c.start.row_absolute, true);
+            }
+            Reference::Named(_) => panic!("expected a cell reference"),
+        }
     }
 
     #[test]
     fn quoted_sheet_name() {
         let refs = extract("='Budget 2024'!C3");
         assert_eq!(refs.len(), 1);
-        assert_eq!(refs[0].sheet.as_deref(), Some("Budget 2024"));
+        assert_eq!(refs[0].sheet(), Some("Budget 2024"));
         assert_eq!(refs[0].to_a1(), "'Budget 2024'!C3");
     }
 
@@ -312,8 +402,46 @@ mod tests {
     fn unquoted_sheet_name() {
         let refs = extract("=Sheet1!A1:A5");
         assert_eq!(refs.len(), 1);
-        assert_eq!(refs[0].sheet.as_deref(), Some("Sheet1"));
+        assert_eq!(refs[0].sheet(), Some("Sheet1"));
         assert_eq!(refs[0].to_a1(), "Sheet1!A1:A5");
+    }
+
+    #[test]
+    fn named_range() {
+        let refs = extract("=TaxRate*2");
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].to_a1(), "TaxRate");
+        assert_eq!(refs[0].cell_count(), None);
+        assert!(matches!(&refs[0], Reference::Named(_)));
+    }
+
+    #[test]
+    fn sheet_qualified_named_range() {
+        let refs = extract("=Sheet1!TaxRate");
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].sheet(), Some("Sheet1"));
+        assert_eq!(refs[0].to_a1(), "Sheet1!TaxRate");
+    }
+
+    #[test]
+    fn function_calls_are_not_named_ranges() {
+        let refs = extract("=ROUND(SUM(A1:A10), 2)");
+        let a1: Vec<String> = refs.iter().map(|r| r.to_a1()).collect();
+        assert_eq!(a1, vec!["A1:A10"]);
+    }
+
+    #[test]
+    fn boolean_literals_are_not_named_ranges() {
+        let refs = extract("=IF(TRUE,A1,B1)");
+        let a1: Vec<String> = refs.iter().map(|r| r.to_a1()).collect();
+        assert_eq!(a1, vec!["A1", "B1"]);
+    }
+
+    #[test]
+    fn named_range_mixed_with_cells() {
+        let refs = extract("=A1+TaxRate-Sheet2!Discount");
+        let a1: Vec<String> = refs.iter().map(|r| r.to_a1()).collect();
+        assert_eq!(a1, vec!["A1", "TaxRate", "Sheet2!Discount"]);
     }
 
     #[test]

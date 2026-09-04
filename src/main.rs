@@ -82,29 +82,38 @@ fn print_json(formula: &str, refs: &[parser::Reference]) {
     println!("  \"formula\": \"{}\",", escape_json(formula));
     println!("  \"references\": [");
     for (idx, r) in refs.iter().enumerate() {
-        let sheet = match &r.sheet {
+        let sheet = match r.sheet() {
             Some(s) => format!("\"{}\"", escape_json(s)),
-            None => "null".to_string(),
-        };
-        let end = match &r.end {
-            Some(e) => format!(
-                "{{ \"col\": \"{}\", \"row\": {} }}",
-                parser::col_to_letters(e.col),
-                e.row
-            ),
             None => "null".to_string(),
         };
         println!("    {{");
         println!("      \"reference\": \"{}\",", escape_json(&r.to_a1()));
         println!("      \"sheet\": {sheet},");
-        println!(
-            "      \"start\": {{ \"col\": \"{}\", \"row\": {} }},",
-            parser::col_to_letters(r.start.col),
-            r.start.row
-        );
-        println!("      \"end\": {end},");
-        println!("      \"is_range\": {},", r.end.is_some());
-        println!("      \"cell_count\": {}", r.cell_count());
+        match r {
+            parser::Reference::Cell(c) => {
+                let end = match &c.end {
+                    Some(e) => format!(
+                        "{{ \"col\": \"{}\", \"row\": {} }}",
+                        parser::col_to_letters(e.col),
+                        e.row
+                    ),
+                    None => "null".to_string(),
+                };
+                println!("      \"kind\": \"cell\",");
+                println!(
+                    "      \"start\": {{ \"col\": \"{}\", \"row\": {} }},",
+                    parser::col_to_letters(c.start.col),
+                    c.start.row
+                );
+                println!("      \"end\": {end},");
+                println!("      \"is_range\": {},", c.end.is_some());
+                println!("      \"cell_count\": {}", c.cell_count());
+            }
+            parser::Reference::Named(n) => {
+                println!("      \"kind\": \"named\",");
+                println!("      \"name\": \"{}\"", escape_json(&n.name));
+            }
+        }
         let comma = if idx + 1 < refs.len() { "," } else { "" };
         println!("    }}{comma}");
     }
@@ -114,29 +123,41 @@ fn print_json(formula: &str, refs: &[parser::Reference]) {
 
 fn print_human(refs: &[parser::Reference]) {
     if refs.is_empty() {
-        println!("no cell references found");
+        println!("no references found");
         return;
     }
 
     let width = refs.iter().map(|r| r.to_a1().len()).max().unwrap_or(0);
     let mut total_cells: u64 = 0;
+    let mut named_count = 0u64;
     for r in refs {
-        let sheet_note = match &r.sheet {
+        let sheet_note = match r.sheet() {
             Some(s) => format!(" (sheet: {s})"),
             None => String::new(),
         };
-        let cells = r.cell_count();
-        total_cells += cells;
-        let label = if cells == 1 { "cell" } else { "cells" };
-        println!(
-            "{:width$}  {cells} {label}{sheet_note}",
-            r.to_a1(),
-            width = width
-        );
+        let detail = match r.cell_count() {
+            Some(cells) => {
+                total_cells += cells;
+                let label = if cells == 1 { "cell" } else { "cells" };
+                format!("{cells} {label}")
+            }
+            None => {
+                named_count += 1;
+                "named range".to_string()
+            }
+        };
+        println!("{:width$}  {detail}{sheet_note}", r.to_a1(), width = width);
     }
     println!();
     let ref_label = if refs.len() == 1 { "reference" } else { "references" };
-    println!("{} {ref_label}, {total_cells} cells total", refs.len());
+    if named_count > 0 {
+        println!(
+            "{} {ref_label}, {total_cells} cells total ({named_count} named range(s) not counted)",
+            refs.len()
+        );
+    } else {
+        println!("{} {ref_label}, {total_cells} cells total", refs.len());
+    }
 }
 
 fn main() -> ExitCode {
