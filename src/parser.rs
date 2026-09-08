@@ -80,10 +80,28 @@ impl NamedRange {
     }
 }
 
+// A structured reference into an Excel table, e.g. `Table1[Column1]` or
+// `Table1[[#Headers],[Column1]]`. `specifier` is whatever was inside the
+// outer brackets, kept verbatim - we don't need to understand `#Headers`,
+// `#Totals`, `@`, or column lists to report that the formula depends on
+// (some part of) the table.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TableRef {
+    pub table: String,
+    pub specifier: String,
+}
+
+impl TableRef {
+    pub fn to_a1(&self) -> String {
+        format!("{}[{}]", self.table, self.specifier)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Reference {
     Cell(CellRange),
     Named(NamedRange),
+    Table(TableRef),
 }
 
 impl Reference {
@@ -91,6 +109,7 @@ impl Reference {
         match self {
             Reference::Cell(c) => c.to_a1(),
             Reference::Named(n) => n.to_a1(),
+            Reference::Table(t) => t.to_a1(),
         }
     }
 
@@ -98,15 +117,17 @@ impl Reference {
         match self {
             Reference::Cell(c) => c.sheet.as_deref(),
             Reference::Named(n) => n.sheet.as_deref(),
+            Reference::Table(_) => None,
         }
     }
 
-    // None for named ranges: without the workbook's name table we don't
-    // know how many cells a name resolves to.
+    // None for named ranges and table references: without the workbook's
+    // name table (or the table's row count) we can't say how many cells
+    // either one resolves to.
     pub fn cell_count(&self) -> Option<u64> {
         match self {
             Reference::Cell(c) => Some(c.cell_count()),
-            Reference::Named(_) => None,
+            Reference::Named(_) | Reference::Table(_) => None,
         }
     }
 }
@@ -271,6 +292,35 @@ fn try_parse_name(chars: &[char], i: usize) -> Option<(String, usize)> {
     Some((chars[i..pos].iter().collect(), pos))
 }
 
+// Parses a balanced `[...]` structured-reference specifier starting at
+// chars[i] (chars[i] == '['). Specifiers can nest brackets, e.g.
+// `Table1[[#Headers],[Column1]]`, so this tracks depth rather than
+// stopping at the first ']'. Returns the inner text (without the outer
+// brackets) and the index just past the closing ']', or None if the
+// brackets never balance before the formula ends.
+fn try_parse_bracket_specifier(chars: &[char], i: usize) -> Option<(String, usize)> {
+    let inner_start = i + 1;
+    let mut depth = 0u32;
+    let mut pos = i;
+    loop {
+        match chars.get(pos) {
+            None => return None,
+            Some('[') => {
+                depth += 1;
+                pos += 1;
+            }
+            Some(']') => {
+                depth -= 1;
+                pos += 1;
+                if depth == 0 {
+                    return Some((chars[inner_start..pos - 1].iter().collect(), pos));
+                }
+            }
+            _ => pos += 1,
+        }
+    }
+}
+
 fn skip_string_literal(chars: &[char], i: usize) -> usize {
     let mut pos = i + 1;
     loop {
@@ -333,6 +383,16 @@ pub fn extract(formula: &str) -> Vec<Reference> {
         }
 
         if let Some((name, next)) = try_parse_name(&chars, cell_start) {
+            // A name immediately followed by '[' is a structured table
+            // reference (`Table1[Column1]`), not a defined name.
+            if chars.get(next) == Some(&'[') {
+                if let Some((specifier, after)) = try_parse_bracket_specifier(&chars, next) {
+                    refs.push(Reference::Table(TableRef { table: name, specifier }));
+                    i = after;
+                    continue;
+                }
+            }
+
             // A name immediately followed by '(' is a function call, and
             // TRUE/FALSE are boolean literals, not defined names. Either
             // way the word is consumed; only whether we record it differs.
@@ -456,6 +516,55 @@ mod tests {
         let refs = extract("=ROUND(A1, 2)");
         assert_eq!(refs.len(), 1);
         assert_eq!(refs[0].to_a1(), "A1");
+    }
+
+    #[test]
+    fn simple_table_column_reference() {
+        let refs = extract("=SUM(Table1[Sales])");
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].to_a1(), "Table1[Sales]");
+        assert_eq!(refs[0].cell_count(), None);
+        assert_eq!(refs[0].sheet(), None);
+        match &refs[0] {
+            Reference::Table(t) => {
+                assert_eq!(t.table, "Table1");
+                assert_eq!(t.specifier, "Sales");
+            }
+            other => panic!("expected a table reference, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn table_reference_with_nested_brackets() {
+        let refs = extract("=Table1[[#Headers],[Column1]]");
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].to_a1(), "Table1[[#Headers],[Column1]]");
+    }
+
+    #[test]
+    fn table_reference_this_row() {
+        let refs = extract("=Table1[@Sales]*Table1[@Price]");
+        let a1: Vec<String> = refs.iter().map(|r| r.to_a1()).collect();
+        assert_eq!(a1, vec!["Table1[@Sales]", "Table1[@Price]"]);
+    }
+
+    #[test]
+    fn table_reference_mixed_with_cells() {
+        let refs = extract("=A1+Table1[Sales]-B2");
+        let a1: Vec<String> = refs.iter().map(|r| r.to_a1()).collect();
+        assert_eq!(a1, vec!["A1", "Table1[Sales]", "B2"]);
+    }
+
+    #[test]
+    fn unbalanced_table_brackets_do_not_hang() {
+        // No closing ']', so this isn't parsed as a table reference at
+        // all; the bracket is treated as ignorable punctuation and the
+        // words on either side of it fall back to named-range handling.
+        // The only thing this test really guards is that extraction
+        // terminates instead of looping forever hunting for a ']'.
+        let refs = extract("=Table1[Sales");
+        let a1: Vec<String> = refs.iter().map(|r| r.to_a1()).collect();
+        assert_eq!(a1, vec!["Table1", "Sales"]);
     }
 
     #[test]

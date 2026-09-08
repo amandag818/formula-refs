@@ -81,6 +81,19 @@ to:
 }
 ```
 
+A structured table reference comes out with `"kind": "table"`, splitting the
+table name from the bracketed specifier:
+
+```json
+{
+  "reference": "Table1[Sales]",
+  "sheet": null,
+  "kind": "table",
+  "table": "Table1",
+  "specifier": "Sales"
+}
+```
+
 ## What it handles
 
 - Plain cell references (`A1`) and ranges (`A1:B10`)
@@ -94,11 +107,15 @@ to:
   workbook's actual name table, it identifies these by elimination: a bare
   word that isn't a cell reference and isn't immediately followed by `(`
   (which would make it a function call) is treated as a name.
+- Structured table references (`Table1[Column1]`, `Table1[@Column1]`,
+  `Table1[[#Headers],[Column1]]`). The bracketed part is reported verbatim
+  as the specifier; the tool doesn't have the table's row count or column
+  list, so these come out with `"kind": "table"` in JSON and aren't counted
+  toward the cell total in the human summary, the same as named ranges.
 
 ## What it doesn't handle yet
 
 - 3D references spanning a sheet range (`Sheet1:Sheet3!A1`)
-- Structured table references (`Table1[Column]`)
 
 See the roadmap for what's planned.
 

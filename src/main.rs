@@ -113,6 +113,11 @@ fn print_json(formula: &str, refs: &[parser::Reference]) {
                 println!("      \"kind\": \"named\",");
                 println!("      \"name\": \"{}\"", escape_json(&n.name));
             }
+            parser::Reference::Table(t) => {
+                println!("      \"kind\": \"table\",");
+                println!("      \"table\": \"{}\",", escape_json(&t.table));
+                println!("      \"specifier\": \"{}\"", escape_json(&t.specifier));
+            }
         }
         let comma = if idx + 1 < refs.len() { "," } else { "" };
         println!("    }}{comma}");
@@ -129,7 +134,7 @@ fn print_human(refs: &[parser::Reference]) {
 
     let width = refs.iter().map(|r| r.to_a1().len()).max().unwrap_or(0);
     let mut total_cells: u64 = 0;
-    let mut named_count = 0u64;
+    let mut uncounted_count = 0u64;
     for r in refs {
         let sheet_note = match r.sheet() {
             Some(s) => format!(" (sheet: {s})"),
@@ -142,17 +147,21 @@ fn print_human(refs: &[parser::Reference]) {
                 format!("{cells} {label}")
             }
             None => {
-                named_count += 1;
-                "named range".to_string()
+                uncounted_count += 1;
+                match r {
+                    parser::Reference::Named(_) => "named range".to_string(),
+                    parser::Reference::Table(_) => "table reference".to_string(),
+                    parser::Reference::Cell(_) => unreachable!("cell refs always have a count"),
+                }
             }
         };
         println!("{:width$}  {detail}{sheet_note}", r.to_a1(), width = width);
     }
     println!();
     let ref_label = if refs.len() == 1 { "reference" } else { "references" };
-    if named_count > 0 {
+    if uncounted_count > 0 {
         println!(
-            "{} {ref_label}, {total_cells} cells total ({named_count} named range(s) not counted)",
+            "{} {ref_label}, {total_cells} cells total ({uncounted_count} not counted: named ranges/tables)",
             refs.len()
         );
     } else {
