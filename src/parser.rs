@@ -446,7 +446,7 @@ mod tests {
                 assert_eq!(c.start.col_absolute, true);
                 assert_eq!(c.start.row_absolute, true);
             }
-            Reference::Named(_) => panic!("expected a cell reference"),
+            other => panic!("expected a cell reference, got {other:?}"),
         }
     }
 
