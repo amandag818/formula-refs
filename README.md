@@ -32,6 +32,29 @@ You can also pipe a formula in on stdin:
 echo '=IF(A1>0,B1,C1)' | formula-refs
 ```
 
+### Grouping by sheet
+
+Pass `--by-sheet` to group the human summary under a heading per sheet,
+useful once a formula pulls from more than a couple of sheets:
+
+```
+formula-refs --by-sheet '=Sheet2!A1+Sheet2!B1+C1'
+```
+
+```
+Sheet2:
+  A1    1 cell
+  B1    1 cell
+
+(no sheet):
+  C1    1 cell
+
+3 references, 3 cells total
+```
+
+`--by-sheet` only affects the human summary; it's rejected together with
+`--json`.
+
 ### JSON output
 
 Pass `--json` for machine-readable output, useful for feeding into a
