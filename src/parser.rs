@@ -574,3 +574,129 @@ mod tests {
         assert_eq!(a1, vec!["A1", "B2", "C1:C10"]);
     }
 }
+
+// Handcrafted malformed-input edge cases, plus a generative fuzz test that
+// throws random garbage at the extractor. `extract` has no "invalid input"
+// error path - anything that isn't a recognizable reference is meant to
+// fall back to being ignored or treated as a bare name - so the property
+// worth testing here isn't a particular output but that the scanner always
+// terminates and never panics, no matter how the input is mangled.
+#[cfg(test)]
+mod fuzz {
+    use super::*;
+
+    #[test]
+    fn empty_formula() {
+        assert_eq!(extract(""), vec![]);
+    }
+
+    #[test]
+    fn unterminated_string_literal_does_not_hang() {
+        let refs = extract("=CONCAT(\"unterminated, A1:B2");
+        assert!(refs.is_empty());
+    }
+
+    #[test]
+    fn unterminated_quoted_sheet_name_falls_back_to_words() {
+        // No closing `'`, so this never becomes a sheet-qualified reference.
+        // "Budget" and "2024" get scanned as ordinary tokens, and the
+        // trailing "A1" is still found as a normal cell reference.
+        let refs = extract("='Budget 2024 A1");
+        let a1: Vec<String> = refs.iter().map(|r| r.to_a1()).collect();
+        assert_eq!(a1, vec!["Budget", "A1"]);
+    }
+
+    #[test]
+    fn lone_dollar_sign_is_not_a_reference() {
+        let refs = extract("=$+A1");
+        let a1: Vec<String> = refs.iter().map(|r| r.to_a1()).collect();
+        assert_eq!(a1, vec!["A1"]);
+    }
+
+    #[test]
+    fn sheet_bang_with_no_reference_after_it() {
+        let refs = extract("=Sheet1!");
+        assert!(refs.is_empty());
+    }
+
+    #[test]
+    fn deeply_nested_unbalanced_brackets_terminate() {
+        let input = format!("=Table1{}", "[".repeat(500));
+        let refs = extract(&input);
+        let a1: Vec<String> = refs.iter().map(|r| r.to_a1()).collect();
+        assert_eq!(a1, vec!["Table1"]);
+    }
+
+    #[test]
+    fn zero_row_falls_back_to_named_reference() {
+        // "A0" isn't a valid cell (rows are 1-based), so it's treated as a
+        // bare name instead of silently rounding to A1 or being dropped.
+        let refs = extract("=A0");
+        assert_eq!(refs.len(), 1);
+        assert!(matches!(&refs[0], Reference::Named(_)));
+        assert_eq!(refs[0].to_a1(), "A0");
+    }
+
+    #[test]
+    fn row_number_beyond_u32_does_not_panic() {
+        let refs = extract("=A99999999999999999999");
+        assert_eq!(refs.len(), 1);
+        assert!(matches!(&refs[0], Reference::Named(_)));
+    }
+
+    // Minimal xorshift64 PRNG so the fuzz test is deterministic and reads
+    // no external crate; we just need random-enough byte soup, not a
+    // statistically rigorous RNG.
+    struct Xorshift64(u64);
+
+    impl Xorshift64 {
+        fn next_u64(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            self.0 = x;
+            x
+        }
+
+        fn next_index(&mut self, bound: usize) -> usize {
+            (self.next_u64() % bound as u64) as usize
+        }
+    }
+
+    // Weighted toward characters the parser actually branches on (quotes,
+    // brackets, `$`, `!`, `:`) rather than a uniform byte range - a fuzz
+    // test that never emits that syntax would never exercise those paths.
+    const ALPHABET: &[char] = &[
+        'A', 'B', 'Z', 'a', 'z', '1', '9', '0', '$', '!', '\'', '"', '[', ']', ':', '.', '_',
+        '@', '#', '(', ')', ',', '+', '-', '*', ' ', '\\',
+    ];
+
+    fn random_string(rng: &mut Xorshift64, len: usize) -> String {
+        (0..len)
+            .map(|_| ALPHABET[rng.next_index(ALPHABET.len())])
+            .collect()
+    }
+
+    // Runs several thousand random malformed formulas through the
+    // extractor. There's no expected output to check - the only failure
+    // modes worth guarding against are a panic (an overflow, an out-of-
+    // bounds index) or a hang (a token that never advances `i`). Every
+    // reference produced is also round-tripped through `to_a1`, `sheet`,
+    // and `cell_count`, since those are the other places a malformed-but-
+    // accepted reference could panic.
+    #[test]
+    fn does_not_panic_on_random_malformed_input() {
+        let mut rng = Xorshift64(0x9e3779b97f4a7c15);
+        for _ in 0..5000 {
+            let len = rng.next_index(40);
+            let input = random_string(&mut rng, len);
+            let refs = extract(&input);
+            for r in &refs {
+                let _ = r.to_a1();
+                let _ = r.sheet();
+                let _ = r.cell_count();
+            }
+        }
+    }
+}
